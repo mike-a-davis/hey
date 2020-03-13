@@ -1,12 +1,6 @@
-# hey
+![hey](http://i.imgur.com/szzD9q0.png)
 
-[![Build Status](https://travis-ci.org/rakyll/hey.png?branch=master)](https://travis-ci.org/rakyll/hey)
-
-Previously known as [github.com/rakyll/boom](https://github.com/rakyll/boom).
-
-Requires go 1.7 or greater.
-
-----
+[![Build Status](https://travis-ci.org/rakyll/hey.svg?branch=master)](https://travis-ci.org/rakyll/hey)
 
 hey is a tiny program that sends some load to a web application.
 
@@ -17,7 +11,14 @@ To preserve the name for its original owner, we renamed this project to hey.
 
 ## Installation
 
-    go get -u github.com/rakyll/hey
+* Linux 64-bit: https://storage.googleapis.com/hey-release/hey_linux_amd64
+* Mac 64-bit: https://storage.googleapis.com/hey-release/hey_darwin_amd64
+* Windows 64-bit: https://storage.googleapis.com/hey-release/hey_windows_amd64
+
+### Package Managers
+
+macOS:
+-  [Homebrew](https://brew.sh/) users can use `brew install hey`.
 
 ## Usage
 
@@ -30,9 +31,12 @@ Usage: hey [options...] <url>
 
 Options:
   -n  Number of requests to run. Default is 200.
-  -c  Number of requests to run concurrently. Total number of requests cannot
+  -c  Number of workers to run concurrently. Total number of requests cannot
       be smaller than the concurrency level. Default is 50.
-  -q  Rate limit, in seconds (QPS).
+  -q  Rate limit, in queries per second (QPS) per worker. Default is no rate limit.
+  -z  Duration of application to send requests. When duration is reached,
+      application stops and exits. If duration is specified, n is ignored.
+      Examples: -z 10s -z 3m.
   -o  Output type. If none provided, a summary is printed.
       "csv" is the only supported alternative. Dumps the response
       metrics in comma-separated values format.
@@ -54,8 +58,9 @@ Options:
   -disable-compression  Disable compression.
   -disable-keepalive    Disable keep-alive, prevents re-use of TCP
                         connections between different HTTP requests.
+  -disable-redirects    Disable following of HTTP redirects
   -cpus                 Number of used cpu cores.
                         (default for current machine is 8 cores)
-  -more                 Provides information on DNS lookup, dialup, request and
-                        response timings.
 ```
+
+Previously known as [github.com/rakyll/boom](https://github.com/rakyll/boom).

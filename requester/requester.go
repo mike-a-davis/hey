@@ -18,25 +18,26 @@ package requester
 import (
 	"bytes"
 	"crypto/tls"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
 	"os"
-	"os/signal"
 	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
 )
 
-const heyUA = "hey/0.0.1"
+// Max size of the buffer of result channel.
+const maxResult = 1000000
+const maxIdleConn = 500
 
 type result struct {
 	err           error
 	statusCode    int
+	offset        time.Duration
 	duration      time.Duration
 	connDuration  time.Duration // connection setup(DNS lookup + Dial up) duration
 	dnsDuration   time.Duration // dns lookup duration
@@ -61,20 +62,20 @@ type Work struct {
 	// H2 is an option to make HTTP/2 requests
 	H2 bool
 
-	// EnableTrace is an option to enable httpTrace
-	EnableTrace bool
-
 	// Timeout in seconds.
 	Timeout int
 
-	// Qps is the rate limit.
-	QPS int
+	// Qps is the rate limit in queries per second.
+	QPS float64
 
 	// DisableCompression is an option to disable compression in response
 	DisableCompression bool
 
 	// DisableKeepAlives is an option to prevents re-use of TCP connections between different HTTP requests
 	DisableKeepAlives bool
+
+	// DisableRedirects is an option to prevent the following of HTTP redirects
+	DisableRedirects bool
 
 	// Output represents the output type. If "csv" is provided, the
 	// output will be dumped as a csv stream.
@@ -84,100 +85,94 @@ type Work struct {
 	// Optional.
 	ProxyAddr *url.URL
 
-	results chan *result
+	// Writer is where results will be written. If nil, results are written to stdout.
+	Writer io.Writer
+
+	initOnce sync.Once
+	results  chan *result
+	stopCh   chan struct{}
+	start    time.Duration
+
+	report *report
 }
 
-// displayProgress outputs the displays until stopCh returns a value.
-func (b *Work) displayProgress(stopCh chan struct{}) {
-	if b.Output != "" {
-		return
+func (b *Work) writer() io.Writer {
+	if b.Writer == nil {
+		return os.Stdout
 	}
+	return b.Writer
+}
 
-	var prev int
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-time.Tick(time.Millisecond * 500):
-			n := len(b.results)
-			if prev < n {
-				prev = n
-				fmt.Printf("%d requests done.\n", n)
-			}
-		}
-	}
+// Init initializes internal data-structures
+func (b *Work) Init() {
+	b.initOnce.Do(func() {
+		b.results = make(chan *result, min(b.C*1000, maxResult))
+		b.stopCh = make(chan struct{}, b.C)
+	})
 }
 
 // Run makes all the requests, prints the summary. It blocks until
 // all work is done.
 func (b *Work) Run() {
-	// append hey's user agent
-	ua := b.Request.UserAgent()
-	if ua == "" {
-		ua = heyUA
-	} else {
-		ua += " " + heyUA
-	}
-
-	b.results = make(chan *result, b.N)
-
-	stopCh := make(chan struct{})
-	go b.displayProgress(stopCh)
-
-	start := time.Now()
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
+	b.Init()
+	b.start = now()
+	b.report = newReport(b.writer(), b.results, b.Output, b.N)
+	// Run the reporter first, it polls the result channel until it is closed.
 	go func() {
-		<-c
-		stopCh <- struct{}{}
-		close(b.results)
-		newReport(b.N, b.results, b.Output, time.Now().Sub(start), b.EnableTrace).finalize()
-		os.Exit(1)
+		runReporter(b.report)
 	}()
-
 	b.runWorkers()
-	stopCh <- struct{}{}
-	if b.Output == "" {
-		fmt.Println("All requests done.")
-	}
+	b.Finish()
+}
 
+func (b *Work) Stop() {
+	// Send stop signal so that workers can stop gracefully.
+	for i := 0; i < b.C; i++ {
+		b.stopCh <- struct{}{}
+	}
+}
+
+func (b *Work) Finish() {
 	close(b.results)
-	newReport(b.N, b.results, b.Output, time.Now().Sub(start), b.EnableTrace).finalize()
+	total := now() - b.start
+	// Wait until the reporter is done.
+	<-b.report.done
+	b.report.finalize(total)
 }
 
 func (b *Work) makeRequest(c *http.Client) {
-	s := time.Now()
+	s := now()
 	var size int64
 	var code int
-	var dnsStart, connStart, resStart, reqStart, delayStart time.Time
+	var dnsStart, connStart, resStart, reqStart, delayStart time.Duration
 	var dnsDuration, connDuration, resDuration, reqDuration, delayDuration time.Duration
 	req := cloneRequest(b.Request, b.RequestBody)
-	if b.EnableTrace {
-		trace := &httptrace.ClientTrace{
-			DNSStart: func(info httptrace.DNSStartInfo) {
-				dnsStart = time.Now()
-			},
-			DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
-				dnsDuration = time.Now().Sub(dnsStart)
-			},
-			GetConn: func(h string) {
-				connStart = time.Now()
-			},
-			GotConn: func(connInfo httptrace.GotConnInfo) {
-				connDuration = time.Now().Sub(connStart)
-				reqStart = time.Now()
-			},
-			WroteRequest: func(w httptrace.WroteRequestInfo) {
-				reqDuration = time.Now().Sub(reqStart)
-				delayStart = time.Now()
-			},
-			GotFirstResponseByte: func() {
-				delayDuration = time.Now().Sub(delayStart)
-				resStart = time.Now()
-			},
-		}
-		req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+	trace := &httptrace.ClientTrace{
+		DNSStart: func(info httptrace.DNSStartInfo) {
+			dnsStart = now()
+		},
+		DNSDone: func(dnsInfo httptrace.DNSDoneInfo) {
+			dnsDuration = now() - dnsStart
+		},
+		GetConn: func(h string) {
+			connStart = now()
+		},
+		GotConn: func(connInfo httptrace.GotConnInfo) {
+			if !connInfo.Reused {
+				connDuration = now() - connStart
+			}
+			reqStart = now()
+		},
+		WroteRequest: func(w httptrace.WroteRequestInfo) {
+			reqDuration = now() - reqStart
+			delayStart = now()
+		},
+		GotFirstResponseByte: func() {
+			delayDuration = now() - delayStart
+			resStart = now()
+		},
 	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
 	resp, err := c.Do(req)
 	if err == nil {
 		size = resp.ContentLength
@@ -185,12 +180,11 @@ func (b *Work) makeRequest(c *http.Client) {
 		io.Copy(ioutil.Discard, resp.Body)
 		resp.Body.Close()
 	}
-	t := time.Now()
-	if b.EnableTrace {
-		resDuration = t.Sub(resStart)
-	}
-	finish := t.Sub(s)
+	t := now()
+	resDuration = t - resStart
+	finish := t - s
 	b.results <- &result{
+		offset:        s,
 		statusCode:    code,
 		duration:      finish,
 		err:           err,
@@ -203,31 +197,28 @@ func (b *Work) makeRequest(c *http.Client) {
 	}
 }
 
-func (b *Work) runWorker(n int) {
+func (b *Work) runWorker(client *http.Client, n int) {
 	var throttle <-chan time.Time
 	if b.QPS > 0 {
 		throttle = time.Tick(time.Duration(1e6/(b.QPS)) * time.Microsecond)
 	}
 
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-		DisableCompression: b.DisableCompression,
-		DisableKeepAlives:  b.DisableKeepAlives,
-		Proxy:              http.ProxyURL(b.ProxyAddr),
-	}
-	if b.H2 {
-		http2.ConfigureTransport(tr)
-	} else {
-		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
-	}
-	client := &http.Client{Transport: tr, Timeout: time.Duration(b.Timeout) * time.Second}
-	for i := 0; i < n; i++ {
-		if b.QPS > 0 {
-			<-throttle
+	if b.DisableRedirects {
+		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		}
-		b.makeRequest(client)
+	}
+	for i := 0; i < n; i++ {
+		// Check if application is stopped. Do not send into a closed channel.
+		select {
+		case <-b.stopCh:
+			return
+		default:
+			if b.QPS > 0 {
+				<-throttle
+			}
+			b.makeRequest(client)
+		}
 	}
 }
 
@@ -235,10 +226,27 @@ func (b *Work) runWorkers() {
 	var wg sync.WaitGroup
 	wg.Add(b.C)
 
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         b.Request.Host,
+		},
+		MaxIdleConnsPerHost: min(b.C, maxIdleConn),
+		DisableCompression:  b.DisableCompression,
+		DisableKeepAlives:   b.DisableKeepAlives,
+		Proxy:               http.ProxyURL(b.ProxyAddr),
+	}
+	if b.H2 {
+		http2.ConfigureTransport(tr)
+	} else {
+		tr.TLSNextProto = make(map[string]func(string, *tls.Conn) http.RoundTripper)
+	}
+	client := &http.Client{Transport: tr, Timeout: time.Duration(b.Timeout) * time.Second}
+
 	// Ignore the case where b.N % b.C != 0.
 	for i := 0; i < b.C; i++ {
 		go func() {
-			b.runWorker(b.N / b.C)
+			b.runWorker(client, b.N/b.C)
 			wg.Done()
 		}()
 	}
@@ -260,4 +268,11 @@ func cloneRequest(r *http.Request, body []byte) *http.Request {
 		r2.Body = ioutil.NopCloser(bytes.NewReader(body))
 	}
 	return r2
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
