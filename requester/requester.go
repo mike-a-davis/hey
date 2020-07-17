@@ -18,8 +18,10 @@ package requester
 import (
 	"bytes"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
@@ -31,7 +33,7 @@ import (
 )
 
 // Max size of the buffer of result channel.
-const maxResult = 1000000
+const maxResult = 100000000
 const maxIdleConn = 500
 
 type result struct {
@@ -256,18 +258,64 @@ func (b *Work) runWorkers() {
 // cloneRequest returns a clone of the provided *http.Request.
 // The clone is a shallow copy of the struct and its Header map.
 func cloneRequest(r *http.Request, body []byte) *http.Request {
-	// shallow copy of the struct
+
+	nanos := time.Now().UnixNano()
+	timestamp := int(nanos / 1000000)
+
+	rand.Seed(nanos)
+	low_average := rand.Intn(10-1+1) + 1
+	// high_average := rand.Intn(30-10+10) + 10
+	low_num := rand.Intn(100-1+1) + 1
+	mid_num := rand.Intn(1000-100+1) + 100
+	high_num := rand.Intn(10000-1000+1) + 1000
+	large_num := rand.Intn(100000-10000+1) + 10000
+	huge_num := rand.Intn(10000000-1000000+1) + 1000000
+	vm_num := rand.Intn(10000000-1000+1) + 1000
+	host_num := rand.Intn(1000000-10+1) + 10
+
+	os_string := []string{"Windows", "Linux", "Mac"}
+	vm_os := os_string[rand.Intn(len(os_string))]
+
+	vm_cpu := fmt.Sprintf(`{"metric":"vsphere_vm_cpu","esxhostname":"DC0_H%d","guest":"other","host":"host%d.example.com","moid":"vm-%d","os":"%s","source":"DC0_H%d_VM0","vcenter":"localhost:8989","vmname":"DC0_H%d_VM0","run_summation":"%d","ready_summation":"%d","usage_average":"%d","used_summation":"%d","demand_average":"%d","timestamp":"%d"}`, host_num, host_num, vm_num, vm_os, vm_num, vm_num, high_num, mid_num, low_average, high_num, mid_num, timestamp)
+	vm_net := fmt.Sprintf(`{"metric":"vsphere_vm_net","esxhostname":"DC0_H%d","guest":"other","host":"host%d.example.com","moid":"vm-%d","os":"%s","source":"DC0_H%d_VM0","vcenter":"localhost:8989","vmname":"DC0_H%d_VM0","bytesRx_average":"%d","bytesTx_average":"%d","timestamp":"%d"}`, host_num, host_num, vm_num, vm_os, vm_num, vm_num, high_num, high_num, timestamp)
+	vm_virtualDisk := fmt.Sprintf(`{"metric":"vsphere_vm_virtualDisk","esxhostname":"DC0_H%d","guest":"other","host":"host%d.example.com","moid":"vm-%d","os":"%s","source":"DC0_H%d_VM0","vcenter":"localhost:8989","vmname":"DC0_H%d_VM0","write_average":"%d","read_average":"%d","timestamp":"%d"}`, host_num, host_num, vm_num, vm_os, vm_num, vm_num, mid_num, low_num, timestamp)
+	host_net := fmt.Sprintf(`{"metric":"vsphere_host_net","esxhostname":"DC0_H%d","host":"host%d.example.com","interface":"vmnic0","moid":"host-%d","os":"%s","source":"DC0_H%d","vcenter":"localhost:8989","usage_average":"%d","bytesTx_average":"%d","bytesRx_average":"%d","timestamp":"%d"}`, host_num, host_num, host_num, vm_os, host_num, high_num, mid_num, low_num, timestamp)
+	host_cpu := fmt.Sprintf(`{"metric":"vsphere_host_cpu","esxhostname":"DC0_H%d","host":"host%d.example.com","moid":"host-%d","os":"%s","source":"DC0_H%d","vcenter":"localhost:8989","utilization_average":"%d","usage_average":"%d","readiness_average":"%d","costop_summation":"%d","coreUtilization_average":"%d","wait_summation":"%d","idle_summation":"%d","latency_average":"%d","ready_summation":"%d","used_summation":"%d","timestamp":"%d"}`, host_num, host_num, host_num, vm_os, host_num, low_num, mid_num, low_num, low_num, mid_num, large_num, large_num, low_num, large_num, large_num, timestamp)
+	host_disk := fmt.Sprintf(`{"metric":"vsphere_host_disk","esxhostname":"DC0_H%d","host":"host%d.example.com","moid":"host-%d","os":"%s","source":"DC0_H%d","vcenter":"localhost:8989","read_average":"%d","write_average":"%d","timestamp":"%d"}`, host_num, host_num, host_num, vm_os, host_num, mid_num, high_num, timestamp)
+	host_mem := fmt.Sprintf(`{"metric":"vsphere_host_mem","esxhostname":"DC0_H%d","host":"host%d.example.com","moid":"host-%d","os":"%s","source":"DC0_H%d","vcenter":"localhost:8989","usage_average":"%d","timestamp":"%d"} `, host_num, host_num, host_num, vm_os, host_num, mid_num, timestamp)
+	internal_vsphere := fmt.Sprintf(`{"metric":"internal_vsphere","host":"host%d.example.com","os":"%s","vcenter":"localhost:8989","connect_ns":"%d","discover_ns":"%d","discovered_objects":"%d","timestamp":"%d"}`, host_num, vm_os, large_num, huge_num, low_num, timestamp)
+	internal_datastore := fmt.Sprintf(`{"metric":"internal_vsphere","host":"host%d.example.com","os":"%s","resourcetype":"datastore","vcenter":"localhost:8989","gather_duration_ns":"%d","gather_count":"%d","timestamp":"%d"}`, host_num, vm_os, large_num, low_num, timestamp)
+	internal_vm := fmt.Sprintf(`{"metric":"internal_vsphere","host":"host%d.example.com","os":"%s","resourcetype":"vm","vcenter":"192.168.1.151","gather_duration_ns":"%d","gather_count":"%d","timestamp":"%d"}`, host_num, vm_os, large_num, low_num, timestamp)
+	internal_host := fmt.Sprintf(`{"metric":"internal_vsphere","host":"host%d.example.com","os":"%s","resourcetype":"host","vcenter":"localhost:8989","gather_count":"%d","gather_duration_ns":"%d","timestamp":"%d"}`, host_num, vm_os, mid_num, huge_num, timestamp)
+	internal_gather := fmt.Sprintf(`{"metric":"internal_gather","host":"host%d.example.com","input":"vsphere","os":"%s","gather_time_ns":"%d","metrics_gathered":"%d","timestamp":"%d"}`, host_num, vm_os, huge_num, mid_num, timestamp)
+
+	var bstring []byte
+	bstring = append(bstring, fmt.Sprintln(vm_cpu)...)
+	bstring = append(bstring, fmt.Sprintln(vm_net)...)
+	bstring = append(bstring, fmt.Sprintln(vm_virtualDisk)...)
+	bstring = append(bstring, fmt.Sprintln(host_net)...)
+	bstring = append(bstring, fmt.Sprintln(host_cpu)...)
+	bstring = append(bstring, fmt.Sprintln(host_disk)...)
+	bstring = append(bstring, fmt.Sprintln(host_mem)...)
+	bstring = append(bstring, fmt.Sprintln(internal_vsphere)...)
+	bstring = append(bstring, fmt.Sprintln(internal_datastore)...)
+	bstring = append(bstring, fmt.Sprintln(internal_vm)...)
+	bstring = append(bstring, fmt.Sprintln(internal_host)...)
+	bstring = append(bstring, fmt.Sprintln(internal_gather)...)
+
 	r2 := new(http.Request)
+
 	*r2 = *r
 	// deep copy of the Header
 	r2.Header = make(http.Header, len(r.Header))
 	for k, s := range r.Header {
 		r2.Header[k] = append([]string(nil), s...)
 	}
-	if len(body) > 0 {
-		r2.Body = ioutil.NopCloser(bytes.NewReader(body))
-	}
+
+	r2.Body = ioutil.NopCloser(bytes.NewReader(bstring))
+	r2.ContentLength = int64(len(bstring))
 	return r2
+
 }
 
 func min(a, b int) int {
